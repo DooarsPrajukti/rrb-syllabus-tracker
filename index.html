@@ -414,7 +414,7 @@
      ------------------------------------------------------------ */
   const CONFIG = {
     GOOGLE_APPS_SCRIPT_URL: 'PASTE_YOUR_WEB_APP_EXEC_URL_HERE',
-    POLL_MS: 60 * 1000
+    POLL_MS: 15 * 1000      // auto-refresh from the Sheet every 15 s
   };
   const HOOK_KEY = 'rrb_webhook_url';
   const BACKUP_KEY = 'rrb_conflict_backup';
@@ -991,7 +991,10 @@
       return { id, subject, topic, exams, status, confidence, revisionCount, targetDate, notes,
                subjectPct: p, subjectStatus: pctStatus(p), subjectManual: hasManual(subject) };
     });
-    return JSON.stringify({ v: 6, topics, ...modulePayload(), snapshot: snapshot(), baseVersion: syncMeta.ver, force: forcePush });
+    return JSON.stringify({ v: 6, topics, ...modulePayload(), snapshot: snapshot(), baseVersion: syncMeta.ver,
+                               // Once this device has read the Sheet (ver > 0) the server's version check already proves it is up to date,
+                               // so an "empty" snapshot is a deliberate edit (e.g. last topic set back to Not Started), not a fresh device.
+                               force: forcePush || (remoteReady && syncMeta.ver > 0) });
   }
 
   // Everything needed to rebuild this device's data on another PC
@@ -1074,6 +1077,9 @@
     syncTimer = setTimeout(() => syncNow(false), 1500);
   }
 
+  let retryCount = 0, retryTimer = null;
+  window.addEventListener('online', () => { if (syncMeta.dirty) scheduleSync(); else pullRemote(false); });
+
   async function syncNow(manual) {
     if (!webhookUrl) { openModal('sheetsModal'); return; }
     clearTimeout(syncTimer); syncTimer = null;
@@ -1091,14 +1097,17 @@
       }
       if (!out.ok) throw new Error(out.error || 'Script reported an error');
       if (typeof out.version !== 'number') throw new Error('Script did not confirm the save. Update to Code.gs v6 and redeploy.');
+      retryCount = 0;
       syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta();
       if (sentForce) forcePush = false;
       setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed version ' + out.version + ': ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '.' + (out.warning ? ' Note: ' + out.warning : ''));
       if (manual) toast('Sheet updated (version ' + out.version + ')');
     } catch (err) {
       // No "no-cors" fallback: an unreadable reply is an error, never a fake success. Data stays marked unsynced.
-      setChip('error', 'Sync failed — retry', netMsg(err));
-      toast('Sync failed: ' + netMsg(err), 'error');
+      setChip('error', 'Sync failed — retrying…', netMsg(err));
+      if (retryCount === 0) toast('Sync failed: ' + netMsg(err), 'error');
+      retryCount++;
+      clearTimeout(retryTimer); retryTimer = setTimeout(() => { if (syncMeta.dirty) scheduleSync(); }, Math.min(60000, 5000 * retryCount));   // auto-retry with backoff
     } finally {
       syncing = false;
       if (resync) { resync = false; scheduleSync(); }
