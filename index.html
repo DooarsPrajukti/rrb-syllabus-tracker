@@ -117,9 +117,6 @@
         <button id="btnPrint" class="text-slate-700 bg-white hover:bg-slate-100 text-sm font-medium py-2 px-3 rounded-lg border border-slate-300 flex items-center gap-2 whitespace-nowrap">
           <i class="fa-solid fa-print"></i> Print
         </button>
-        <button id="btnReset" class="text-red-600 bg-red-50 hover:bg-red-100 text-sm font-medium py-2 px-3 rounded-lg border border-red-200 flex items-center gap-2 whitespace-nowrap">
-          <i class="fa-solid fa-rotate-right"></i> Reset
-        </button>
         <input id="fileImport" type="file" accept="application/json,.json" class="hidden">
       </div>
     </div>
@@ -276,21 +273,6 @@
 </main>
 
 <!-- ================= MODALS ================= -->
-<div id="resetModal" class="modal fixed inset-0 bg-slate-900/50 backdrop-blur-sm items-center justify-center z-50 p-4 no-print">
-  <div class="panel bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
-    <div class="flex items-center gap-4 mb-4">
-      <div class="bg-red-100 text-red-600 w-12 h-12 rounded-full flex items-center justify-center flex-shrink-0 text-xl"><i class="fa-solid fa-triangle-exclamation"></i></div>
-      <div>
-        <h3 class="text-lg font-bold text-slate-900">Reset all progress?</h3>
-        <p class="text-sm text-slate-500 mt-1">This permanently clears every status, confidence, revision count, date and note. Practice, revision and mock records are not affected. Tip: use <b>Backup</b> first.</p>
-      </div>
-    </div>
-    <div class="flex justify-end gap-3 mt-6">
-      <button data-close="resetModal" class="px-4 py-2 text-sm font-medium text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-lg">Cancel</button>
-      <button id="confirmReset" class="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg shadow-sm">Yes, Reset Data</button>
-    </div>
-  </div>
-</div>
 
 <div id="sheetsModal" class="modal fixed inset-0 bg-slate-900/50 backdrop-blur-sm items-center justify-center z-50 p-4 no-print">
   <div class="panel bg-white rounded-xl shadow-2xl max-w-lg w-full p-6">
@@ -434,6 +416,9 @@
   let practice = [], revisions = [], mocks = [];
   let touched = { practice: false, revisions: false, mocks: false };   // module used in this browser?
   const MOD_KEY = 'rrb_modules_v5';
+  const META_KEY = 'rrb_sync_meta';
+  let syncMeta = { ver: 0, dirty: false };   // ver = last Sheet version this device has seen; dirty = unsynced local changes
+  let changeSeq = 0, pulling = false;
 
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -498,9 +483,13 @@
       touched = { practice: !!(m.touched && m.touched.practice), revisions: !!(m.touched && m.touched.revisions), mocks: !!(m.touched && m.touched.mocks) };
     } catch (e) {}
     cleanModules();
+    try { const m = JSON.parse(localStorage.getItem(META_KEY) || '{}'); syncMeta = { ver: Math.max(0, parseInt(m.ver, 10) || 0), dirty: !!m.dirty }; } catch (e) {}
   }
 
+  const saveMeta = () => { try { localStorage.setItem(META_KEY, JSON.stringify(syncMeta)); } catch (e) {} };
+
   function persist() {
+    saveMeta();
     try { localStorage.setItem(STORE_KEY, JSON.stringify(items)); localStorage.setItem(PCT_KEY, JSON.stringify(subjectPct));
             localStorage.setItem(MOD_KEY, JSON.stringify({ practice, revisions, mocks, touched })); }
     catch (e) { toast('Browser storage is full or blocked — use Backup to keep your data', 'error'); }
@@ -509,6 +498,7 @@
 
   let saveTimer;
   function changed(opts = {}) {
+    syncMeta.dirty = true; changeSeq++;
     persist();
     if (opts.debounce) { clearTimeout(saveTimer); saveTimer = setTimeout(scheduleSync, 400); }
     else scheduleSync();
@@ -982,7 +972,56 @@
       return { id, subject, topic, exams, status, confidence, revisionCount, targetDate, notes,
                subjectPct: p, subjectStatus: pctStatus(p), subjectManual: hasManual(subject) };
     });
-    return JSON.stringify({ v: 5, topics, ...modulePayload() });
+    return JSON.stringify({ v: 6, topics, ...modulePayload(), snapshot: snapshot(), baseVersion: syncMeta.ver });
+  }
+
+  // Everything needed to rebuild this device's data on another PC
+  function snapshot() {
+    return { items: items.map(({ id, topic, status, confidence, revisionCount, targetDate, notes }) => ({ id, topic, status, confidence, revisionCount, targetDate, notes })),
+             practice, revisions, mocks, touched };
+  }
+  const dataKey = o => JSON.stringify([o.items, o.practice || [], o.revisions || [], o.mocks || []]);
+  const hasLocalData = () => items.some(i => i.status !== 'Not Started' || i.confidence || i.revisionCount || i.targetDate || i.notes)
+    || practice.length || revisions.length || mocks.length;
+
+  function applyRemote(snap) {
+    items = mergeSaved(snap.items);
+    practice = Array.isArray(snap.practice) ? snap.practice : []; revisions = Array.isArray(snap.revisions) ? snap.revisions : [];
+    mocks = Array.isArray(snap.mocks) ? snap.mocks : [];
+    const t = snap.touched || {};
+    touched = { practice: touched.practice || !!t.practice, revisions: touched.revisions || !!t.revisions, mocks: touched.mocks || !!t.mocks };
+    cleanModules();
+    syncMeta = { ver: snap.version, dirty: false };
+    persist(); renderAll();
+    setChip('ok', 'Synced ' + timeNow(), 'Loaded the latest data from your Sheet');
+  }
+
+  // Decide what to do with the Sheet's copy of the data
+  function reconcile(snap) {
+    if (!snap || !Array.isArray(snap.items)) return;
+    const v = Number(snap.version) || 0; snap.version = v;
+    if (v === syncMeta.ver) { if (syncMeta.dirty) scheduleSync(); return; }
+    if (v < syncMeta.ver) { syncMeta.ver = v; syncMeta.dirty = true; saveMeta(); scheduleSync(); return; }   // Sheet was reset/replaced
+    if (dataKey(snap) === dataKey(snapshot())) { syncMeta = { ver: v, dirty: false }; saveMeta(); return; }  // already identical
+    if (!syncMeta.dirty && !(syncMeta.ver === 0 && hasLocalData())) { applyRemote(snap); toast('Updated from your Sheet (changes from another device)'); return; }
+    if (confirm('Your Sheet has newer data saved from another device.\n\nOK = load the Sheet’s data here (replaces unsynced changes on this device)\nCancel = keep this device’s data and overwrite the Sheet')) {
+      applyRemote(snap); toast('Loaded data from your Sheet');
+    } else { syncMeta.ver = v; syncMeta.dirty = true; saveMeta(); scheduleSync(); }
+  }
+
+  // Ask the Sheet for its latest copy (needs script v6)
+  async function pullRemote(initial) {
+    if (!webhookUrl || syncing || pulling || syncTimer) return;
+    if (!initial && document.activeElement && document.activeElement.matches('input, textarea, select')) return;
+    pulling = true;
+    try {
+      const res = await fetch(webhookUrl + (webhookUrl.includes('?') ? '&' : '?') + 'action=pull&t=' + Date.now(), { cache: 'no-store' });
+      const out = await res.json();
+      if (!out || !out.ok) return;
+      if (!out.snapshot) { if (hasLocalData()) { syncMeta.dirty = true; scheduleSync(); } return; }   // first run: seed the Sheet
+      reconcile(out.snapshot);
+    } catch (e) { /* offline or older script: ignore */ }
+    finally { pulling = false; }
   }
 
   function scheduleSync() {
@@ -998,14 +1037,16 @@
     if (syncing) { resync = true; return; }
     syncing = true;
     setChip('syncing', 'Syncing…', '');
-    const data = payload();
+    const data = payload(), seq = changeSeq;
     const headers = { 'Content-Type': 'text/plain;charset=utf-8' }; // avoids CORS preflight
     try {
       const res = await fetch(webhookUrl, { method: 'POST', headers, body: data });
       let out;
       try { out = await res.json(); }
       catch (e) { throw new Error('Unexpected reply from Google. Re-deploy the script as a Web App with access set to "Anyone".'); }
+      if (out.conflict) { setChip('pending', 'Checking other device…', ''); reconcile(out.snapshot); return; }
       if (!out.ok) throw new Error(out.error || 'Script reported an error');
+      if (out.version !== undefined) { syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta(); }
       setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '. Click to sync again.');
       if (manual) toast('Sheet updated (' + out.topics + ' topics)');
     } catch (err) {
@@ -1014,6 +1055,7 @@
         try {
           await fetch(webhookUrl, { method: 'POST', mode: 'no-cors', headers, body: data });
           setChip('ok', 'Sent ' + timeNow(), 'Delivered, but the browser cannot confirm the result. Check the sheet.');
+          setTimeout(() => pullRemote(true), 4000);
           if (manual) toast('Sent to Sheets (unconfirmed)');
         } catch (err2) {
           setChip('error', 'Sync failed — retry', 'Network error: ' + err2.message);
@@ -1050,7 +1092,8 @@
     try {
       const r = await fetch(u);
       const txt = await r.text();
-      if (/v5/.test(txt)) hookMsg('Connected — latest script (v5). Topics, subject %, practice, revision and mock tabs will sync.', true);
+      if (/v6/.test(txt)) hookMsg('Connected — latest script (v6). Everything syncs, including across your devices.', true);
+      else if (/v5/.test(txt)) hookMsg('Connected, but script is v5: it only pushes data. Update to v6 (re-deploy as New version) to sync between PCs.', true);
       else if (/v4/.test(txt)) hookMsg('Connected, but script is v4: topics sync, practice/revision/mock tabs need the v5 script (re-deploy as New version).', true);
       else if (/live/i.test(txt)) hookMsg('Connected — topics will sync. (Older script: the Dashboard won’t show subject %; optional update, see instructions.)', true);
       else hookMsg('Got a reply, but not from the tracker script. Re-deploy and set access to "Anyone".', false);
@@ -1124,15 +1167,6 @@
 
   $('btnPrint').addEventListener('click', () => window.print());
 
-  $('btnReset').addEventListener('click', () => openModal('resetModal'));
-  $('confirmReset').addEventListener('click', () => {
-    items = DEFAULTS.map(d => sanitize(null, d));
-    subjectPct = {};
-    changed(); renderAll();
-    closeModal('resetModal');
-    toast('All progress has been reset');
-  });
-
   /* ============================================================
      INIT
      ============================================================ */
@@ -1148,6 +1182,11 @@
     syncFilterControls();
     renderAll();
     if (webhookUrl) setChip('ok', 'Sheets: connected', 'Click to sync now'); else setChip('off', 'Sheets: off', 'Not connected — click the Sheets button to set up');
+    // Cross-device sync: pull on open, when the tab regains focus, and every minute
+    pullRemote(true);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) pullRemote(false); });
+    window.addEventListener('focus', () => pullRemote(false));
+    setInterval(() => { if (!document.hidden) pullRemote(false); }, 60 * 1000);
     // Refresh overdue highlighting if the tab stays open past midnight
     let lastDay = todayISO();
     setInterval(() => { if (todayISO() !== lastDay && !document.activeElement.matches('textarea, input')) { lastDay = todayISO(); renderAll(); } }, 60 * 1000);
