@@ -405,7 +405,19 @@
      STATE + STORAGE
      ============================================================ */
   const STORE_KEY = 'rrb_tracker_data';
+  /* ------------------------------------------------------------
+     CONFIGURATION  (edit once, commit, publish — every device uses it)
+     Paste your deployed Apps Script Web App URL (ends in /exec) below.
+     This is NOT a secret: anyone who can open the site can see it, so the
+     Sheet is effectively public read/write. See the deployment notes.
+     A URL saved through the "Sheets" dialog on a device overrides this.
+     ------------------------------------------------------------ */
+  const CONFIG = {
+    GOOGLE_APPS_SCRIPT_URL: 'PASTE_YOUR_WEB_APP_EXEC_URL_HERE',
+    POLL_MS: 60 * 1000
+  };
   const HOOK_KEY = 'rrb_webhook_url';
+  const BACKUP_KEY = 'rrb_conflict_backup';
   const FILTER_KEY = 'rrb_tracker_filters';
   const PCT_KEY = 'rrb_subject_pct';
 
@@ -419,6 +431,13 @@
   const META_KEY = 'rrb_sync_meta';
   let syncMeta = { ver: 0, dirty: false };   // ver = last Sheet version this device has seen; dirty = unsynced local changes
   let changeSeq = 0, pulling = false;
+  let remoteReady = false;   // true once this page session has successfully read the Sheet; no uploads before that
+  let forcePush = false;     // set after Import so a deliberate "empty" restore passes the server's overwrite guard
+  function resolveHook() {
+    let o = ''; try { o = localStorage.getItem(HOOK_KEY) || ''; } catch (e) {}
+    if (o && validHook(o)) return o;
+    return validHook(CONFIG.GOOGLE_APPS_SCRIPT_URL) ? CONFIG.GOOGLE_APPS_SCRIPT_URL : '';
+  }
 
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -473,7 +492,7 @@
   function loadAll() {
     try { items = mergeSaved(JSON.parse(localStorage.getItem(STORE_KEY) || '[]')); }
     catch (e) { items = mergeSaved([]); }
-    webhookUrl = localStorage.getItem(HOOK_KEY) || '';
+    webhookUrl = resolveHook();
     try { subjectPct = cleanPct(JSON.parse(localStorage.getItem(PCT_KEY) || '{}')); } catch (e) { subjectPct = {}; }
     try { filters = { ...filters, ...JSON.parse(localStorage.getItem(FILTER_KEY) || '{}') }; } catch (e) {}
     try {
@@ -972,7 +991,7 @@
       return { id, subject, topic, exams, status, confidence, revisionCount, targetDate, notes,
                subjectPct: p, subjectStatus: pctStatus(p), subjectManual: hasManual(subject) };
     });
-    return JSON.stringify({ v: 6, topics, ...modulePayload(), snapshot: snapshot(), baseVersion: syncMeta.ver });
+    return JSON.stringify({ v: 6, topics, ...modulePayload(), snapshot: snapshot(), baseVersion: syncMeta.ver, force: forcePush });
   }
 
   // Everything needed to rebuild this device's data on another PC
@@ -1004,28 +1023,52 @@
     if (v < syncMeta.ver) { syncMeta.ver = v; syncMeta.dirty = true; saveMeta(); scheduleSync(); return; }   // Sheet was reset/replaced
     if (dataKey(snap) === dataKey(snapshot())) { syncMeta = { ver: v, dirty: false }; saveMeta(); return; }  // already identical
     if (!syncMeta.dirty && !(syncMeta.ver === 0 && hasLocalData())) { applyRemote(snap); toast('Updated from your Sheet (changes from another device)'); return; }
-    if (confirm('Your Sheet has newer data saved from another device.\n\nOK = load the Sheet’s data here (replaces unsynced changes on this device)\nCancel = keep this device’s data and overwrite the Sheet')) {
+    if (confirm('Your Sheet has newer data saved from another device.\n\nOK = load the Sheet’s data here (a backup of this device’s unsynced data is kept in this browser)\nCancel = keep this device’s data and overwrite the Sheet')) {
+      try { localStorage.setItem(BACKUP_KEY, JSON.stringify({ at: new Date().toISOString(), snapshot: snapshot() })); } catch (e) {}
       applyRemote(snap); toast('Loaded data from your Sheet');
     } else { syncMeta.ver = v; syncMeta.dirty = true; saveMeta(); scheduleSync(); }
   }
+
+  // Read a JSON reply from the Apps Script (it redirects to script.googleusercontent.com; CORS is allowed for text replies)
+  async function readJson(res) {
+    let out;
+    try { out = await res.json(); }
+    catch (e) { throw new Error('Google did not return data. Re-deploy the script as a Web App: Execute as "Me", access "Anyone".'); }
+    return out;
+  }
+  const netMsg = e => e instanceof TypeError
+    ? 'Cannot reach the Sheet (offline, wrong URL, or the Web App is not shared with "Anyone").' : e.message;
 
   // Ask the Sheet for its latest copy (needs script v6)
   async function pullRemote(initial) {
     if (!webhookUrl || syncing || pulling || syncTimer) return;
     if (!initial && document.activeElement && document.activeElement.matches('input, textarea, select')) return;
     pulling = true;
+    const seq = changeSeq;
+    if (!remoteReady) setChip('syncing', 'Connecting…', 'Loading your data from the Sheet');
     try {
       const res = await fetch(webhookUrl + (webhookUrl.includes('?') ? '&' : '?') + 'action=pull&t=' + Date.now(), { cache: 'no-store' });
-      const out = await res.json();
-      if (!out || !out.ok) return;
-      if (!out.snapshot) { if (hasLocalData()) { syncMeta.dirty = true; scheduleSync(); } return; }   // first run: seed the Sheet
+      const out = await readJson(res);
+      if (!out || !out.ok) throw new Error((out && out.error) || 'Script reported an error');
+      if (typeof out.version !== 'number') throw new Error('The script is outdated. Paste Code.gs (v6) and deploy a New version.');
+      if (seq !== changeSeq) return;                     // user edited while we were waiting: don't apply a stale reply
+      remoteReady = true;
+      if (!out.snapshot) {                               // Sheet is empty: seed it only if this device has real data
+        if (hasLocalData()) { syncMeta.dirty = true; scheduleSync(); } else setChip('ok', 'Synced ' + timeNow(), 'Sheet is empty');
+        return;
+      }
       reconcile(out.snapshot);
-    } catch (e) { /* offline or older script: ignore */ }
+      if (!syncMeta.dirty && !syncTimer && !syncing) setChip('ok', 'Synced ' + timeNow(), 'Up to date with your Sheet (version ' + out.version + ')');
+    } catch (e) {
+      setChip('error', remoteReady ? 'Sync problem — retry' : 'Not connected — retry', netMsg(e));
+      if (initial) toast('Could not load from Sheet: ' + netMsg(e), 'error');
+    }
     finally { pulling = false; }
   }
 
   function scheduleSync() {
     if (!webhookUrl) return;
+    if (!remoteReady) { setChip('pending', 'Waiting for Sheet…', 'Changes upload after the Sheet has been read'); pullRemote(true); return; }
     setChip('pending', 'Changes pending…', 'Will sync shortly');
     clearTimeout(syncTimer);
     syncTimer = setTimeout(() => syncNow(false), 1500);
@@ -1034,37 +1077,28 @@
   async function syncNow(manual) {
     if (!webhookUrl) { openModal('sheetsModal'); return; }
     clearTimeout(syncTimer); syncTimer = null;
+    if (!remoteReady) { pullRemote(true); return; }      // never upload before a successful read
     if (syncing) { resync = true; return; }
     syncing = true;
     setChip('syncing', 'Syncing…', '');
-    const data = payload(), seq = changeSeq;
-    const headers = { 'Content-Type': 'text/plain;charset=utf-8' }; // avoids CORS preflight
+    const data = payload(), seq = changeSeq, sentForce = forcePush;
     try {
-      const res = await fetch(webhookUrl, { method: 'POST', headers, body: data });
-      let out;
-      try { out = await res.json(); }
-      catch (e) { throw new Error('Unexpected reply from Google. Re-deploy the script as a Web App with access set to "Anyone".'); }
-      if (out.conflict) { setChip('pending', 'Checking other device…', ''); reconcile(out.snapshot); return; }
-      if (!out.ok) throw new Error(out.error || 'Script reported an error');
-      if (out.version !== undefined) { syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta(); }
-      setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '. Click to sync again.');
-      if (manual) toast('Sheet updated (' + out.topics + ' topics)');
-    } catch (err) {
-      if (err instanceof TypeError) {
-        // Browser blocked reading the reply (CORS/redirect). Fall back to fire-and-forget.
-        try {
-          await fetch(webhookUrl, { method: 'POST', mode: 'no-cors', headers, body: data });
-          setChip('ok', 'Sent ' + timeNow(), 'Delivered, but the browser cannot confirm the result. Check the sheet.');
-          setTimeout(() => pullRemote(true), 4000);
-          if (manual) toast('Sent to Sheets (unconfirmed)');
-        } catch (err2) {
-          setChip('error', 'Sync failed — retry', 'Network error: ' + err2.message);
-          toast('Sync failed: check your connection', 'error');
-        }
-      } else {
-        setChip('error', 'Sync failed — retry', err.message);
-        toast(err.message, 'error');
+      const res = await fetch(webhookUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: data }); // text/plain = no CORS preflight
+      const out = await readJson(res);
+      if (out.conflict) {
+        if (!out.snapshot) { syncMeta.ver = 0; syncMeta.dirty = true; saveMeta(); resync = true; return; }
+        setChip('pending', 'Checking other device…', ''); reconcile(out.snapshot); return;
       }
+      if (!out.ok) throw new Error(out.error || 'Script reported an error');
+      if (typeof out.version !== 'number') throw new Error('Script did not confirm the save. Update to Code.gs v6 and redeploy.');
+      syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta();
+      if (sentForce) forcePush = false;
+      setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed version ' + out.version + ': ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '.' + (out.warning ? ' Note: ' + out.warning : ''));
+      if (manual) toast('Sheet updated (version ' + out.version + ')');
+    } catch (err) {
+      // No "no-cors" fallback: an unreadable reply is an error, never a fake success. Data stays marked unsynced.
+      setChip('error', 'Sync failed — retry', netMsg(err));
+      toast('Sync failed: ' + netMsg(err), 'error');
     } finally {
       syncing = false;
       if (resync) { resync = false; scheduleSync(); }
@@ -1073,12 +1107,12 @@
 
   // Don't lose a pending change when the tab closes
   window.addEventListener('pagehide', () => {
-    if (syncTimer && webhookUrl && navigator.sendBeacon) {
+    if (syncTimer && webhookUrl && remoteReady && navigator.sendBeacon) {
       try { navigator.sendBeacon(webhookUrl, new Blob([payload()], { type: 'text/plain;charset=utf-8' })); } catch (e) {}
     }
   });
 
-  function validHook(u) { return /^https:\/\/script\.google(usercontent)?\.com\/.+/.test(u); }
+  function validHook(u) { return typeof u === 'string' && /^https:\/\/script\.google(usercontent)?\.com\/.+/.test(u); }
   function hookMsg(text, ok) { const m = $('webhookMsg'); m.textContent = text; m.className = 'text-xs mt-2 min-h-[1rem] ' + (ok ? 'text-emerald-600' : 'text-red-600'); }
 
   $('btnSheets').addEventListener('click', () => { $('webhookInput').value = webhookUrl; hookMsg('', true); openModal('sheetsModal'); });
@@ -1090,32 +1124,31 @@
     if (!/\/exec(\?.*)?$/.test(u)) hookMsg('Tip: the URL should end with /exec (not /dev).', false);
     hookMsg('Testing…', true);
     try {
-      const r = await fetch(u);
-      const txt = await r.text();
-      if (/v6/.test(txt)) hookMsg('Connected — latest script (v6). Everything syncs, including across your devices.', true);
-      else if (/v5/.test(txt)) hookMsg('Connected, but script is v5: it only pushes data. Update to v6 (re-deploy as New version) to sync between PCs.', true);
-      else if (/v4/.test(txt)) hookMsg('Connected, but script is v4: topics sync, practice/revision/mock tabs need the v5 script (re-deploy as New version).', true);
-      else if (/live/i.test(txt)) hookMsg('Connected — topics will sync. (Older script: the Dashboard won’t show subject %; optional update, see instructions.)', true);
-      else hookMsg('Got a reply, but not from the tracker script. Re-deploy and set access to "Anyone".', false);
-    } catch (e) { hookMsg('Could not reach the script. Check the URL and that access is set to "Anyone".', false); }
+      const r = await fetch(u + '?t=' + Date.now(), { cache: 'no-store' });
+      const o = await r.json();
+      if (o && o.ok && o.scriptVersion === 'v6') hookMsg('Connected — script v6. Sheet data version: ' + o.version + (o.hasData ? ' (has saved data).' : ' (empty).'), true);
+      else if (o && o.ok) hookMsg('Connected, but the script is not v6. Paste the new Code.gs and deploy a New version.', false);
+      else hookMsg('Got a reply, but not from the tracker script.', false);
+    } catch (e) { hookMsg('Could not read a reply. Check the URL (ends in /exec) and that access is set to "Anyone". If the script is still the old version, redeploy it.', false); }
   });
 
   $('btnSaveHook').addEventListener('click', () => {
     const u = $('webhookInput').value.trim();
     if (u && !validHook(u)) return hookMsg('That doesn’t look like a Google Apps Script URL.', false);
-    webhookUrl = u;
     try { u ? localStorage.setItem(HOOK_KEY, u) : localStorage.removeItem(HOOK_KEY); } catch (e) {}
+    webhookUrl = resolveHook(); remoteReady = false;
     closeModal('sheetsModal');
-    if (u) { toast('Connected — syncing now'); syncNow(true); }
+    if (webhookUrl) { toast('Connected — loading from Sheet'); pullRemote(true); }
     else setChip('off', 'Sheets: off', 'Not connected');
   });
 
   $('btnDisconnect').addEventListener('click', () => {
-    webhookUrl = ''; localStorage.removeItem(HOOK_KEY);
+    try { localStorage.removeItem(HOOK_KEY); } catch (e) {}
+    webhookUrl = resolveHook(); remoteReady = false;
     $('webhookInput').value = '';
-    setChip('off', 'Sheets: off', 'Not connected');
     closeModal('sheetsModal');
-    toast('Sheets sync disconnected');
+    if (webhookUrl) { toast('Using the default sheet from the site configuration'); pullRemote(true); }
+    else { setChip('off', 'Sheets: off', 'Not connected'); toast('Sheets sync disconnected'); }
   });
 
   /* ============================================================
@@ -1151,7 +1184,7 @@
         if (Array.isArray(parsed.mocks)) { mocks = parsed.mocks; touch('mocks'); }
         cleanModules();
       }
-      changed(); renderAll();
+      forcePush = true; changed(); renderAll();
       toast('Progress restored');
     } catch (err) { toast('That file isn’t a valid tracker backup', 'error'); }
   });
@@ -1181,12 +1214,12 @@
     if (!['All', 'Overdue', ...STATUSES].includes(filters.status)) filters.status = 'All';
     syncFilterControls();
     renderAll();
-    if (webhookUrl) setChip('ok', 'Sheets: connected', 'Click to sync now'); else setChip('off', 'Sheets: off', 'Not connected — click the Sheets button to set up');
+    if (webhookUrl) setChip('syncing', 'Connecting…', 'Loading your data from the Sheet'); else setChip('off', 'Sheets: not configured', 'Set CONFIG.GOOGLE_APPS_SCRIPT_URL in index.html, or click the Sheets button');
     // Cross-device sync: pull on open, when the tab regains focus, and every minute
     pullRemote(true);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) pullRemote(false); });
     window.addEventListener('focus', () => pullRemote(false));
-    setInterval(() => { if (!document.hidden) pullRemote(false); }, 60 * 1000);
+    setInterval(() => { if (!document.hidden) pullRemote(false); }, CONFIG.POLL_MS);
     // Refresh overdue highlighting if the tab stays open past midnight
     let lastDay = todayISO();
     setInterval(() => { if (todayISO() !== lastDay && !document.activeElement.matches('textarea, input')) { lastDay = todayISO(); renderAll(); } }, 60 * 1000);
