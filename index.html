@@ -1069,8 +1069,8 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
   const ORDER = ['theory', 'practice', 'revision', 'mock', 'analysis', 'backlog'];
   const SETK = ['st', 'hrs', 'tH', 'nT', 'pH', 'nP', 'rH', 'nR', 'sT', 'sP', 'sR', 'mk', 'an'];
   const newV4 = () => ({ seed: newSeed(), v: 4, dd: {}, done: {}, mock: {} });
-  const blankRec = () => ({ st: null, hrs: null, tH: null, nT: null, pH: null, nP: null, rH: null, nR: null, sT: [], sP: [], sR: [], mk: { on: false, kind: 'short', m: null }, an: null });
-  const cloneSet = r => { const o = blankRec(); if (r) SETK.forEach(k => { if (r[k] !== undefined) o[k] = JSON.parse(JSON.stringify(r[k])); }); return o; };
+  const blankRec = () => ({ st: 'study', hrs: null, tH: null, nT: null, pH: null, nP: null, rH: null, nR: null, sT: [], sP: [], sR: [], mk: { on: false, kind: 'short', m: null }, an: null });
+  const cloneSet = r => { const o = blankRec(); if (r) SETK.forEach(k => { if (r[k] !== undefined) o[k] = JSON.parse(JSON.stringify(r[k])); }); if (o.st !== 'off') o.st = 'study'; return o; };
   function genWeek(w) {
     const base = w.v === 4 ? [[], [], [], [], [], [], []] : w.v === 3 ? genWeekV3(w) : isTP(w) ? genWeekTP(w) : genWeekOld(w);
     if (w.dd) Object.keys(w.dd).forEach(d => { const r = w.dd[d]; if (r && Array.isArray(r.ses)) base[d] = r.ses.map(x => ({ ...x, d: +d })); });
@@ -1176,8 +1176,8 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     const r = draftFor(start, d), v = validateRec(r), date = pAdd(start, d), saved = w.dd && w.dd[d], st = r.st, nv = x => x === null || x === undefined ? '' : x;
     const badge = st === 'study' ? 'Study Day' : st === 'off' ? 'Off Day' : 'Not set';
     let h = `<div class="pl-card no-print pl-ed" id="plEditor"><div class="pl-row"><b>${DAYN[d]} ${esc(pFmt(date))}</b><span class="pl-badge st-${st || 'unset'}">${badge}</span>${saved && saved.dirty ? '<span class="pl-wn text-xs">Settings saved · timetable not generated yet</span>' : ''}</div>
-      <div class="pl-row"><button class="pl-b" data-act="markstudy">Mark as Study Day</button><button class="pl-b pl-d" data-act="markoff">Mark as Off Day</button><button class="pl-b" data-act="copyprev">Copy Previous Day's Settings</button>${st === 'study' ? '<button class="pl-b" data-act="filldef">Fill from my defaults</button>' : ''}</div>`;
-    if (!st) h += `<div class="pl-per">Choose Study Day or Off Day. Nothing is planned for a date until you decide.${!saved && w.v !== 4 ? ' This date follows the weekly auto-plan; saving here changes only this date.' : ''}</div>`;
+      <div class="pl-row"><button type="button" class="pl-b${st === 'off' ? '' : ' pl-d'}" data-act="toggleday" aria-label="${st === 'off' ? 'Currently an Off Day. Switch to Study Day' : 'Currently a Study Day. Switch to Off Day'}"><i class="fa-solid fa-repeat"></i> ${st === 'off' ? 'Mark as Study Day' : 'Mark as Off Day'}</button><button class="pl-b" data-act="copyprev">Copy Previous Day's Settings</button>${st === 'study' ? '<button class="pl-b" data-act="filldef">Fill from my defaults</button>' : ''}</div>`;
+    if (!st) h += `<div class="pl-per">Nothing is planned for a date until you set its hours.${!saved && w.v !== 4 ? ' This date follows the weekly auto-plan; saving here changes only this date.' : ''}</div>`;
     else {
       const mkv = r.mk && r.mk.on ? r.mk.kind : 'none';
       const mock = `<label class="pl-fl">${st === 'off' ? 'Allow a mock on this Off Day' : 'Mock test'}<select class="pl-in" data-dr="mk"><option value="none"${mkv === 'none' ? ' selected' : ''}>No mock</option><option value="short"${mkv === 'short' ? ' selected' : ''}>Short mock</option><option value="full"${mkv === 'full' ? ' selected' : ''}>Full mock</option></select></label>
@@ -1207,10 +1207,10 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     if (!viewWeek) viewWeek = cur;
     const cfg = planCfg(), start = viewWeek; let w = ensureWeek(start); if (!w) w = newV4();   // a week with no saved plan yet is an empty manual week (saved when you save a date)
     if (selD === null) selD = viewWeek === cur ? (new Date(today + 'T00:00:00').getDay() + 6) % 7 : 0;
-    const dayRec = d => (w.dd && w.dd[d]) || null, stateOf = d => { const r = dayRec(d); return r ? r.st : (w.v === 4 ? null : 'auto'); };
-    const strip = `<div class="pl-card no-print"><div class="pl-row"><b class="text-sm">Dates</b><label class="text-sm">Pick any date <input class="pl-in pl-date" type="date" data-pickdate value="${esc(pAdd(start, selD))}"></label><span class="pl-muted">Tap a date to set it as a Study Day or Off Day.</span></div>
+    const dayRec = d => (w.dd && w.dd[d]) || null, stateOf = d => { const r = dayRec(d); return r ? (r.st === 'off' ? 'off' : 'study') : (w.v === 4 ? 'study' : 'auto'); };
+    const strip = `<div class="pl-card no-print"><div class="pl-row"><b class="text-sm">Dates</b><label class="text-sm">Pick any date <input class="pl-in pl-date" type="date" data-pickdate value="${esc(pAdd(start, selD))}"></label><span class="pl-muted">Every date is a Study Day by default. Select a date and use the toggle to switch it to an Off Day (and back).</span></div>
       <div class="pl-strip">${[0, 1, 2, 3, 4, 5, 6].map(d => { const r = dayRec(d), st = stateOf(d), date = pAdd(start, d);
-        const em = st === 'off' ? 'Off Day' : st === 'study' ? (r.hrs > 0 ? hmF(r.hrs) + ' study' : 'Enter hours') + (r.dirty ? ' ●' : '') : st === 'auto' ? 'Auto plan' : 'Not set';
+        const em = st === 'off' ? 'Off Day' : st === 'study' ? (r && r.hrs > 0 ? hmF(r.hrs) + ' study' : 'Study Day') + (r && r.dirty ? ' ●' : '') : st === 'auto' ? 'Auto plan' : 'Not set';
         return `<button type="button" class="pl-dchip st-${st || 'unset'}${selD === d ? ' sel' : ''}${date === today ? ' tdy' : ''}" data-act="seld" data-d="${d}" aria-pressed="${selD === d}"><b>${DAYN[d]}</b><span>${esc(pFmt(date))}</span><em>${em}</em></button>`; }).join('')}</div></div>${dayEditorHTML(w, start, selD)}`;
     const info = catInfo(cfg), usedMin = info.reduce((a, x) => a + x.used, 0), availMin = Math.round(cfg.avail * 60), over = usedMin > availMin;
     const sumTxt = info.map(x => x.label + ' ' + fmtMin(x.used)).join(' · ') + ' · Total ' + fmtMin(usedMin);
@@ -1246,7 +1246,7 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     const carry = planner.carry[start] || [], cPend = carry.filter(c => !c.done).length;
     const ovCell = (ds, ts) => { const l = ds.filter(x => ts.includes(x.t)); return l.length ? l.map(x => `<div class="${w.done[x.k] ? 'ov-d' : ''}">${x.s && SUBJ[x.s] ? esc(SUBJ[x.s].short) : esc(TYPE_LBL[x.t])} <em>${fmtMin(x.m)}</em></div>`).join('') : '–'; };
     const overview = `<div class="pl-card pl-ov"><table class="pl-tbl pl-ovt"><tr><th>Day</th><th>Theory</th><th>Practice</th><th>Revision</th><th>Mock / other</th><th>Total</th></tr>` +
-      days.map((ds, d) => { const date = pAdd(start, d); return `<tr class="${date === today ? 'ov-t' : ''}"><td><b>${DAYN[d]}</b> ${esc(pFmt(date))}${stateOf(d) === 'off' ? ' <em>Off Day</em>' : stateOf(d) === null ? ' <em>Not set</em>' : ''}</td><td>${ovCell(ds, ['theory'])}</td><td>${ovCell(ds, ['practice'])}</td><td>${ovCell(ds, ['revision'])}</td><td>${ovCell(ds, ['mock', 'analysis', 'backlog'])}</td><td><b>${fmtMin(ds.reduce((a, x) => a + x.m, 0))}</b></td></tr>`; }).join('') + `</table></div>`;
+      days.map((ds, d) => { const date = pAdd(start, d); return `<tr class="${date === today ? 'ov-t' : ''}"><td><b>${DAYN[d]}</b> ${esc(pFmt(date))}${stateOf(d) === 'off' ? ' <em>Off Day</em>' : ''}</td><td>${ovCell(ds, ['theory'])}</td><td>${ovCell(ds, ['practice'])}</td><td>${ovCell(ds, ['revision'])}</td><td>${ovCell(ds, ['mock', 'analysis', 'backlog'])}</td><td><b>${fmtMin(ds.reduce((a, x) => a + x.m, 0))}</b></td></tr>`; }).join('') + `</table></div>`;
     h += `<div class="pl-stats">
       <div class="pl-card pl-stat"><b>${esc(pFmt(start))}</b><span>Week starting (Mon)</span></div>
       <div class="pl-card pl-stat"><b>${fmtMin(all.reduce((a, x) => a + x.m, 0))}</b><span>Total weekly study time</span></div>
@@ -1255,8 +1255,8 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
       ${isTP(w) ? `<div class="pl-card pl-stat"><b>${fmtMin(w.theory + w.practice)}</b><span>Per day · Theory ${w.theory}m + Practice ${w.practice}m</span></div>` : `<div class="pl-card pl-stat"><b>${avg === null ? '–' : avg + '%'}</b><span>Mock accuracy · ${mk.length}/7 logged</span></div>`}</div>${overview}<div class="pl-days">`;
     days.forEach((ds, d) => {
       const date = pAdd(start, d), dn = ds.filter(x => w.done[x.k]).length, pc = ds.length ? Math.round(dn / ds.length * 100) : 0, st = stateOf(d), rc = dayRec(d);
-      h += `<div class="pl-day${date === today ? ' today' : ''}"><div class="pl-dh"><span><b>${DAYN[d]}</b> ${esc(pFmt(date))}${st === 'off' ? ' · Off Day' : st === 'study' ? (rc.hrs > 0 ? ' · ' + hmF(rc.hrs) : ' · Study Day') : isTP(w) && ds[0] ? ' · ' + esc(SUBJ[ds[0].s].short) : st === 'auto' && d === 6 ? ' · full mock' : ''}</span><span><button type="button" class="pl-b pl-sm no-print" data-act="seld" data-d="${d}">Edit</button> <b>${pc}%</b></span></div><div class="pl-bar2"><i style="width:${pc}%"></i></div>`;
-      if (!ds.length) h += `<div class="pl-msg" style="padding:8px">${st === 'off' ? 'Off Day: nothing scheduled' : st === 'study' ? 'Study Day: set hours / subjects, then Update Selected Date' : 'Not set: choose Study Day or Off Day'}</div>`;
+      h += `<div class="pl-day${date === today ? ' today' : ''}"><div class="pl-dh"><span><b>${DAYN[d]}</b> ${esc(pFmt(date))}${st === 'off' ? ' · Off Day' : st === 'study' ? (rc && rc.hrs > 0 ? ' · ' + hmF(rc.hrs) : ' · Study Day') : isTP(w) && ds[0] ? ' · ' + esc(SUBJ[ds[0].s].short) : st === 'auto' && d === 6 ? ' · full mock' : ''}</span><span><button type="button" class="pl-b pl-sm no-print" data-act="seld" data-d="${d}">Edit</button> <b>${pc}%</b></span></div><div class="pl-bar2"><i style="width:${pc}%"></i></div>`;
+      if (!ds.length) h += `<div class="pl-msg" style="padding:8px">${st === 'off' ? 'Off Day: nothing scheduled' : st === 'study' ? 'Study Day: set hours / subjects, then Update Selected Date' : 'Nothing planned yet'}</div>`;
       ds.forEach(x => {
         const dn2 = !!w.done[x.k], late = !dn2 && date < today;
         h += `<label class="pl-s${dn2 ? ' done' : ''}${late ? ' late' : ''}"><input type="checkbox" data-k="${x.k}"${dn2 ? ' checked' : ''}><span class="pl-n">${TYPE_LBL[x.t]}${x.t === 'mock' ? ((x.kind || (d === 6 ? 'full' : 'short')) === 'full' ? ' (full-length)' : ' (short)') : ''}${x.s ? `<small>${esc(SUBJ[x.s].short)}</small>` : ''}</span><em>${fmtMin(x.m)}</em></label>`;
@@ -1279,7 +1279,7 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     const today = todayISO(), st = (dn, date) => dn ? 'Completed' : date < today ? 'Overdue' : date === today ? 'Due Today' : 'Upcoming', rows = [];
     weeks.forEach(ws => { const w = planner.weeks[ws];
       const dayTot = {}; const wk = genWeek(w).flat(); wk.forEach(x => { dayTot[x.d] = (dayTot[x.d] || 0) + x.m; });
-      const dType = d => { const r = w.dd && w.dd[d]; return r ? (r.st === 'off' ? 'Off Day' : r.st === 'study' ? 'Study Day' : '') : (w.v === 4 ? '' : 'Auto'); }, dHrs = d => { const r = w.dd && w.dd[d]; return r && r.hrs !== null && r.hrs !== undefined ? r.hrs : ''; };
+      const dType = d => { const r = w.dd && w.dd[d]; return r ? (r.st === 'off' ? 'Off Day' : 'Study Day') : (w.v === 4 ? 'Study Day' : 'Auto'); }, dHrs = d => { const r = w.dd && w.dd[d]; return r && r.hrs !== null && r.hrs !== undefined ? r.hrs : ''; };
       wk.forEach(x => { const date = pAdd(ws, x.d), m = x.t === 'mock' ? w.mock[x.d] : null;
         rows.push({ id: ws + ':' + x.k, week: ws, day: DAYN[x.d], date, dayTotal: dayTot[x.d], dayType: dType(x.d), studyHours: dHrs(x.d), session: TYPE_LBL[x.t] + (x.t === 'mock' ? ((x.kind || (x.d === 6 ? 'full' : 'short')) === 'full' ? ' (full)' : ' (short)') : ''), subject: x.s ? SUBJ[x.s].short : '',
           minutes: x.m, status: st(w.done[x.k], date), correct: m ? m.c : '', wrong: m ? m.i : '', accuracy: m ? acc(m) : '', score: m && m.s !== null ? m.s : '' }); });
@@ -1320,8 +1320,11 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     else if (act === 'next') { if (viewWeek < pAdd(cur, 7 * 52)) { viewWeek = pAdd(viewWeek, 7); renderPlanner(); } else toast('That is as far ahead as the planner goes', 'error'); }
     else if (act === 'today') { viewWeek = cur; selD = (new Date(todayISO() + 'T00:00:00').getDay() + 6) % 7; renderPlanner(); }
     else if (act === 'seld') { selD = +b.dataset.d; plDraft = null; renderPlanner(); const ed = $('plEditor'); if (ed && ed.scrollIntoView && window.innerWidth < 900) ed.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }
-    else if (act === 'markoff') { const w = wkE(), r = draftFor(viewWeek, selD); r.st = 'off'; r.hrs = 0; const kept = commitDay(w, selD, r, true); plDraft = null; changed({ debounce: true }); renderPlanner(); toast('Marked as Off Day' + (kept ? ' · ' + kept + ' completed session(s) kept' : '')); }
-    else if (act === 'markstudy') { const w = wkE(), r = draftFor(viewWeek, selD); if (r.st === 'study') { toast('Already a Study Day'); return; } r.st = 'study'; r.hrs = null; commitDay(w, selD, r, false); plDraft = null; changed({ debounce: true }); renderPlanner(); toast('Study Day: enter your hours, then Update Selected Date'); }
+    else if (act === 'toggleday') {   // one action: Study Day <-> Off Day, based on the date's current state (no record = Study Day)
+      const w = wkE(), r = draftFor(viewWeek, selD);
+      if (r.st === 'off') { r.st = 'study'; r.hrs = null; commitDay(w, selD, r, false); plDraft = null; changed({ debounce: true }); renderPlanner(); toast('Marked as Study Day: enter your hours, then Update Selected Date'); }
+      else { r.st = 'off'; r.hrs = 0; const kept = commitDay(w, selD, r, true); plDraft = null; changed({ debounce: true }); renderPlanner(); toast('Marked as Off Day' + (kept ? ' · ' + kept + ' completed session(s) kept' : '')); }
+    }
     else if (act === 'copyprev') { const p = recForDate(pAdd(viewWeek, selD - 1)); if (!p) { toast("The previous day has no saved settings", 'error'); return; } plDraft = { ws: viewWeek, d: selD, rec: cloneSet(p) }; renderPlanner(); toast('Copied. Review, then save'); }
     else if (act === 'filldef') { const c = planCfg(), r = draftFor(viewWeek, selD); PCATS.forEach(([, , hK, nK, sK]) => { r[hK] = c[hK]; r[nK] = c[nK]; r[sK] = c[sK].slice(0, c[nK]); }); renderPlanner(); }
     else if (act === 'savedaily' || act === 'updatedate') { const r = draftFor(viewWeek, selD), v = validateRec(r);
@@ -1332,7 +1335,7 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
       toast(act === 'updatedate' ? 'Date updated' + (kept ? ' · ' + kept + ' completed session(s) kept' : '') : 'Daily settings saved' + (v.soft.length ? ' (incomplete: press Update when ready)' : ' · press Update Selected Date or Generate Timetable')); }
     else if (act === 'pickall' || act === 'pickclear') { const k = PCATS.find(p => p[0] === b.dataset.cat)[4]; planCfg()[k] = act === 'pickall' ? Object.keys(SUBJ) : []; settingsChanged(); }
     else if (act === 'gen' || act === 'shuf') planRegen('Generate a new timetable? Ticks on today and future days will be cleared. Completed past days and mock scores are kept.');
-    else if (act === 'reset') { const w = planner.weeks[viewWeek]; if (w && confirm('Reset this week? Ticks AND mock scores of this week (including past days) will be cleared, including every date you set. Manual weeks go back to Not set. Other weeks are not touched.')) { w.mock = {}; w.done = {}; w.frozen = {}; w.dd = {}; plDraft = null; if (w.v === 4) { delete w.cfg; } else { delete w.hours; delete w.theory; delete w.practice; delete w.subs; w.v = 3; w.cfg = weekCfg(planCfg()); w.seed = newSeed(); } changed({ debounce: true }); renderPlanner(); toast('Week reset'); } }
+    else if (act === 'reset') { const w = planner.weeks[viewWeek]; if (w && confirm('Reset this week? Ticks AND mock scores of this week (including past days) will be cleared, including every date you set. Manual weeks go back to all Study Days. Other weeks are not touched.')) { w.mock = {}; w.done = {}; w.frozen = {}; w.dd = {}; plDraft = null; if (w.v === 4) { delete w.cfg; } else { delete w.hours; delete w.theory; delete w.practice; delete w.subs; w.v = 3; w.cfg = weekCfg(planCfg()); w.seed = newSeed(); } changed({ debounce: true }); renderPlanner(); toast('Week reset'); } }
     else if (act === 'print') window.print();
     else if (act === 'csv') planCsv();
     else if (act === 'savemock') {
@@ -1895,7 +1898,7 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
     try {
       const r = await fetch(u + '?t=' + Date.now(), { cache: 'no-store' });
       const o = await r.json();
-      if (o && o.ok && o.scriptVersion === 'v6') hookMsg('Connected — script v6. Sheet data version: ' + o.version + (o.hasData ? ' (has saved data).' : ' (empty).'), true);
+      if (o && o.ok && o.scriptVersion) hookMsg('Connected — script ' + o.scriptVersion + '. Sheet data version: ' + o.version + (o.hasData ? ' (has saved data).' : ' (empty).'), true);
       else if (o && o.ok) hookMsg('Connected, but the script is not v6. Paste the new Code.gs and deploy a New version.', false);
       else hookMsg('Got a reply, but not from the tracker script.', false);
     } catch (e) { hookMsg('Could not read a reply. Check the URL (ends in /exec) and that access is set to "Anyone". If the script is still the old version, redeploy it.', false); }
