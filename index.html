@@ -1291,15 +1291,49 @@ button,select,input,textarea,label.pl-s{touch-action:manipulation}
   // New random order for today + future days of the viewed week; completed past days are kept
   const wkE = () => planner.weeks[viewWeek] || (planner.weeks[viewWeek] = newV4());   // week to edit (created on first save)
   function planRegen(msg) {
-    const w = planner.weeks[viewWeek], cur = pMon(todayISO()); if (!w) return;
-    if (w.v === 4) { const r = genWeekMine(w); changed({ debounce: true }); renderPlanner();
-      toast(r.n ? 'Timetable generated for ' + r.n + ' date' + (r.n === 1 ? '' : 's') + (r.bad.length ? ' · incomplete: ' + r.bad.join(', ') : '') : r.bad.length ? 'Incomplete settings: ' + r.bad.join(', ') : 'Nothing to generate: save settings for a date first', r.n ? undefined : 'error'); return; }
-    if (viewWeek < cur) { toast('Past weeks are kept as they were', 'error'); return; }
-    const frozenDay = k => !!(w.frozen && w.frozen[parseInt(k, 10)]);
-    if (Object.keys(w.done).some(k => !frozenDay(k)) && !confirm(msg)) return;
-    freezePast(w, viewWeek); Object.keys(w.done).forEach(k => { if (!frozenDay(k)) delete w.done[k]; });
-    applyWeekCfg(w, viewWeek, true); changed({ debounce: true }); renderPlanner(); toast('New timetable generated');
+  const cur = pMon(todayISO());
+  const w = planner.weeks[viewWeek] || wkE();
+  if (w.v === 4) {
+    // 1) auto-fill empty Study Days (today onward) from the Study settings defaults
+    const cfg = planCfg(), today = todayISO(), rr = rng(newSeed()), q = {};
+    w.dd = w.dd || {};
+    for (let d = 0; d < 7; d++) {
+      if (pAdd(viewWeek, d) < today) continue;                                         // past dates are never touched
+      const old = w.dd[d];
+      if (old && old.st === 'off') continue;                                           // Off Days stay off
+      if (old && old.ses !== undefined && !old.dirty) continue;                        // already generated
+      if (old && (old.hrs > 0 || PCATS.some(([, , hK]) => old[hK] > 0))) continue;    // you set it yourself: keep it
+      const nr = old ? cloneSet(old) : blankRec(); nr.st = 'study';
+      PCATS.forEach(([t, , hK, nK, sK]) => {
+        const pool = cfg[sK], n = cfg[hK] > 0 ? Math.min(cfg[nK], pool.length) : 0;
+        nr[hK] = n ? cfg[hK] : 0; nr[nK] = n; nr[sK] = [];
+        while (nr[sK].length < n) {
+          if (!q[t] || !q[t].length) q[t] = pool.slice().sort(() => rr() - .5);
+          const s = q[t].find(x => !nr[sK].includes(x));
+          if (s === undefined) { q[t] = null; continue; }
+          q[t].splice(q[t].indexOf(s), 1); nr[sK].push(s);
+        }
+      });
+      nr.hrs = Math.max(cfg.avail, PCATS.reduce((a, [, , hK]) => a + nr[hK], 0));
+      w.dd[d] = nr;
+    }
+    // 2) build sessions for every saved-but-ungenerated date
+    const r = genWeekMine(w), names = r.bad.map(x => DAYN[x.d]).join(', ');
+    if (r.bad.length) { selD = r.bad[0].d; plDraft = null; }
+    changed({ debounce: true }); renderPlanner();
+    const why = r.bad.length ? ' · ' + DAYN[r.bad[0].d] + ': ' + r.bad[0].why : '';
+    toast(r.n ? 'Timetable generated for ' + r.n + ' date' + (r.n === 1 ? '' : 's') + (r.bad.length ? ' · incomplete: ' + names + why : '')
+      : r.bad.length ? 'Incomplete settings: ' + names + why
+      : viewWeek < cur ? 'Past weeks are kept as they were' : 'Nothing new to generate for this week', r.n ? undefined : 'error');
+    return;
   }
+  // old auto-layout weeks: unchanged behaviour
+  if (viewWeek < cur) { toast('Past weeks are kept as they were', 'error'); return; }
+  const frozenDay = k => !!(w.frozen && w.frozen[parseInt(k, 10)]);
+  if (Object.keys(w.done).some(k => !frozenDay(k)) && !confirm(msg)) return;
+  freezePast(w, viewWeek); Object.keys(w.done).forEach(k => { if (!frozenDay(k)) delete w.done[k]; });
+  applyWeekCfg(w, viewWeek, true); changed({ debounce: true }); renderPlanner(); toast('New timetable generated');
+}
   // A settings box changed: save it (syncs with the tracker) and rebuild this week from today onward
   function settingsChanged() {
     planCfg(); const w = planner.weeks[viewWeek], cur = pMon(todayISO());
