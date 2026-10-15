@@ -1231,7 +1231,7 @@
 
   // Ask the Sheet for its latest copy (needs script v6)
   async function pullRemote(initial) {
-    if (!webhookUrl || syncing || pulling || syncTimer) return;
+    if (!webhookUrl || syncing || pulling || syncTimer || fullTimer) return;
     if (!initial && document.activeElement && document.activeElement.matches('input, textarea, select')) return;
     pulling = true;
     const seq = changeSeq;
@@ -1254,6 +1254,7 @@
       if (typeof out.version !== 'number') throw new Error('The script is outdated. Paste Code.gs (v6) and deploy a New version.');
       if (seq !== changeSeq) return;                     // user edited while we were waiting: don't apply a stale reply
       remoteReady = true;
+      if (tabsStale() && !syncMeta.dirty) armFullSync(1500);
       if (!out.snapshot) {                               // Sheet is empty: seed it only if this device has real data
         if (hasLocalData()) { syncMeta.dirty = true; scheduleSync(); } else setChip('ok', 'Synced ' + timeNow(), 'Sheet is empty');
         return;
@@ -1279,6 +1280,19 @@
   window.addEventListener('online', () => { if (syncMeta.dirty) scheduleSync(); else pullRemote(false); });
 
   let fullTimer = null;
+  // The visible tabs (subjects / Dashboard) are rebuilt by a "full" sync that follows quick saves.
+  // v9: runs 2.5 s after the last edit (was 20 s), is retried if the page is busy, and survives closing the tab.
+  const TABS_KEY = 'rrb_tabs_stale';
+  const tabsStale = () => { try { return localStorage.getItem(TABS_KEY) === '1'; } catch (e) { return false; } };
+  const setTabsStale = v => { try { if (v) localStorage.setItem(TABS_KEY, '1'); else localStorage.removeItem(TABS_KEY); } catch (e) {} };
+  function armFullSync(ms) {
+    clearTimeout(fullTimer);
+    fullTimer = setTimeout(() => {
+      fullTimer = null;
+      if (syncing || syncTimer) { armFullSync(1500); return; }     // busy: try again instead of dropping it
+      syncNow(false, true);
+    }, ms);
+  }
   async function syncNow(manual, full) {
     if (!webhookUrl) { openModal('sheetsModal'); return; }
     clearTimeout(syncTimer); syncTimer = null;
@@ -1298,11 +1312,13 @@
       if (!out.ok) throw new Error(out.error || 'Script reported an error');
       if (typeof out.version !== 'number') throw new Error('Script did not confirm the save. Update to Code.gs v6 and redeploy.');
       retryCount = 0;
-      clearTimeout(fullTimer);
-      if (lite && out.skipped) fullTimer = setTimeout(() => { if (!syncing && !syncTimer) syncNow(false, true); }, 20000);
+      clearTimeout(fullTimer); fullTimer = null;
+      if (lite && out.skipped) { setTabsStale(true); armFullSync(2500); }
+      else if (!out.skipped) setTabsStale(false);
       syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta();
       if (sentForce) forcePush = false;
-      setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed version ' + out.version + ': ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '.' + (out.warning ? ' Note: ' + out.warning : ''));
+      if (lite && out.skipped) setChip('pending', 'Saved ✓ updating tabs…', 'Your data is stored (version ' + out.version + '). The Sheet tabs refresh in a few seconds.');
+      else setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed version ' + out.version + ': ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '.' + (out.warning ? ' Note: ' + out.warning : ''));
       if (manual) toast('Sheet updated (version ' + out.version + ')');
     } catch (err) {
       // No "no-cors" fallback: an unreadable reply is an error, never a fake success. Data stays marked unsynced.
