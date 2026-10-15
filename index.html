@@ -40,9 +40,15 @@
     textarea { border: none !important; resize: none !important; }
     select { appearance: none; -webkit-appearance: none; border: none !important; background-image: none !important; }
   }
+#syncBar{position:fixed;top:0;left:0;right:0;height:3px;z-index:70;overflow:hidden;opacity:0;pointer-events:none;transition:opacity .25s}
+#syncBar.on{opacity:1}
+#syncBar::before{content:"";position:absolute;top:0;bottom:0;width:40%;background:linear-gradient(90deg,transparent,#3b82f6,#10b981,transparent);animation:syncSlide 1.1s ease-in-out infinite}
+@keyframes syncSlide{0%{left:-40%}100%{left:100%}}
+@media (prefers-reduced-motion:reduce){#syncBar::before{animation:none;left:0;width:100%}}
 </style>
 </head>
 <body class="bg-slate-100 text-slate-800 min-h-screen flex flex-col">
+<div id="syncBar" class="no-print" aria-hidden="true"></div>
 
 <!-- ================= HEADER ================= -->
 <header class="bg-slate-900 text-white shadow-md sticky top-0 z-30">
@@ -1144,10 +1150,12 @@
       off:     ['bg-white text-slate-500 border-slate-300', 'fa-cloud'],
       pending: ['bg-amber-50 text-amber-700 border-amber-200', 'fa-pen'],
       syncing: ['bg-blue-50 text-blue-700 border-blue-200', 'fa-arrows-rotate fa-spin'],
+      updating:['bg-blue-50 text-blue-700 border-blue-200', 'fa-arrows-rotate fa-spin'],
       ok:      ['bg-emerald-50 text-emerald-700 border-emerald-200', 'fa-cloud-arrow-up'],
       error:   ['bg-red-50 text-red-700 border-red-200', 'fa-triangle-exclamation']
     }[state];
     chip.className = 'text-sm font-medium py-2 px-3 rounded-lg border flex items-center gap-2 whitespace-nowrap ' + styles[0];
+    const bar = $('syncBar'); if (bar) bar.classList.toggle('on', state === 'syncing' || state === 'updating' || state === 'pending');   // loading bar while anything is in flight
     chip.innerHTML = `<i class="fa-solid ${styles[1]}"></i> ${esc(text)}`;
     chip.title = title || '';
   }
@@ -1299,7 +1307,7 @@
     if (!remoteReady) { pullRemote(true); return; }      // never upload before a successful read
     if (syncing) { resync = true; return; }
     syncing = true;
-    setChip('syncing', 'Syncing…', '');
+    setChip('syncing', (manual || full) ? 'Updating Sheet tabs…' : 'Saving…', (manual || full) ? 'Rebuilding the Sheet tabs - almost done' : 'Saving your change');
     const lite = !manual && !full;      // quick saves skip rebuilding the report tabs (the slow part); a full sync follows when you pause
     const data = payload(lite), seq = changeSeq, sentForce = forcePush;
     try {
@@ -1317,7 +1325,7 @@
       else if (!out.skipped) setTabsStale(false);
       syncMeta.ver = out.version; if (changeSeq === seq) syncMeta.dirty = false; saveMeta();
       if (sentForce) forcePush = false;
-      if (lite && out.skipped) setChip('pending', 'Saved ✓ updating tabs…', 'Your data is stored (version ' + out.version + '). The Sheet tabs refresh in a few seconds.');
+      if (lite && out.skipped) setChip('updating', 'Saved ✓ updating Sheet tabs…', 'Your data is stored (version ' + out.version + '). The Sheet tabs refresh in a few seconds.');
       else setChip('ok', 'Synced ' + timeNow(), 'Sheet confirmed version ' + out.version + ': ' + out.topics + ' topics' + ['practice', 'revisions', 'mocks'].filter(k => out[k] !== undefined).map(k => ', ' + out[k] + ' ' + k).join('') + '.' + (out.warning ? ' Note: ' + out.warning : ''));
       if (manual) toast('Sheet updated (version ' + out.version + ')');
     } catch (err) {
